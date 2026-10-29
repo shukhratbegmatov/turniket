@@ -142,6 +142,87 @@ class TicketApi:
         return self._call("PUT", "ValidateTicketAsync", {"hashCode": hash_code})
 
 
+# --------------------------------------------------------------------------- USB relay
+class UsbRelay:
+    """LCUS-1 / CH340 USB rele (COM-port). Kontakt C3 BUTTON1 (IN+GND) ga yoki
+    to'g'ridan-to'g'ri turniketning 'open' kirishiga ulanadi."""
+
+    ON = bytes([0xA0, 0x01, 0x01, 0xA2])
+    OFF = bytes([0xA0, 0x01, 0x00, 0xA1])
+
+    def __init__(self, cfg):
+        r = cfg["relay"]
+        self.port = r["serial_port"]
+        self.baud = r.getint("baudrate", 9600)
+        self.pulse = r.getfloat("pulse_seconds", 0.5)
+        self.lock = threading.Lock()
+
+    def _ensure(self):
+        import serial
+        serial.Serial(self.port, self.baud, timeout=1).close()
+        log.info("USB rele topildi: %s", self.port)
+
+    def open(self):
+        import serial
+        with self.lock:
+            try:
+                with serial.Serial(self.port, self.baud, timeout=1) as s:
+                    s.write(self.ON)
+                    s.flush()
+                    time.sleep(self.pulse)
+                    s.write(self.OFF)
+                    s.flush()
+                log.info("TURNIKET OCHILDI (USB rele impulsi %.1f s)", self.pulse)
+                return True
+            except Exception as e:
+                log.error("USB rele xatosi (%s): %s", self.port, e)
+                return False
+
+    def keepalive_loop(self):
+        return
+
+
+class HttpRelay:
+    """Tarmoq rele (Shelly, Sonoff DIY, KMtronic, Dingtian va h.k.) — HTTP so'rov bilan.
+    on_url chaqiriladi, pulse_seconds kutiladi, off_url (bo'lsa) chaqiriladi."""
+
+    def __init__(self, cfg):
+        r = cfg["http_relay"]
+        self.on_url = r["on_url"]
+        self.off_url = r.get("off_url", "").strip()
+        self.pulse = r.getfloat("pulse_seconds", 0.5)
+        self.auth = (r["user"], r.get("password", "")) if r.get("user") else None
+        self.lock = threading.Lock()
+
+    def _ensure(self):
+        pass
+
+    def open(self):
+        with self.lock:
+            try:
+                requests.get(self.on_url, auth=self.auth, timeout=3).raise_for_status()
+                if self.off_url:
+                    time.sleep(self.pulse)
+                    requests.get(self.off_url, auth=self.auth, timeout=3).raise_for_status()
+                log.info("TURNIKET OCHILDI (tarmoq rele)")
+                return True
+            except Exception as e:
+                log.error("Tarmoq rele xatosi: %s", e)
+                return False
+
+    def keepalive_loop(self):
+        return
+
+
+def make_opener(cfg):
+    mode = cfg.get("general", "open_mode", fallback="c3").strip().lower()
+    if mode == "relay":
+        return UsbRelay(cfg)
+    if mode == "http":
+        return HttpRelay(cfg)
+    return Panel(cfg)
+
+
 # --------------------------------------------------------------------------- C3 panel
 class Panel:
     def __init__(self, cfg):
@@ -204,7 +285,7 @@ def serial_reader(cfg, on_code):
     baud = r.getint("baudrate", 9600)
     while True:
         try:
-            with serial.Serial(port, baud, timeout=0.15) as ser:
+            with serial.serial_for_url(port, baudrate=baud, timeout=0.15) as ser:
                 log.info("QR o'quvchi ulandi: %s @ %d", port, baud)
                 buf = b""
                 while True:
@@ -237,7 +318,7 @@ def stdin_reader(on_code):
 class Gateway:
     def __init__(self, cfg):
         self.api = TicketApi(cfg)
-        self.panel = Panel(cfg)
+        self.panel = make_opener(cfg)
         self.check_info = cfg.getboolean("general", "call_ticket_info", fallback=False)
         self.debounce = cfg.getfloat("general", "same_code_ignore_seconds", fallback=4)
         self.last = {}
@@ -294,7 +375,7 @@ def main():
     setup_logging(cfg)
 
     if args.test_open:
-        sys.exit(0 if Panel(cfg).open() else 1)
+        sys.exit(0 if make_opener(cfg).open() else 1)
 
     gw = Gateway(cfg)
 
