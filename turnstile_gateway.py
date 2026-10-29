@@ -3,12 +3,14 @@
 ЕЭСБО (CultureTicket) <-> ZKTeco C3-200 turniket shlyuzi.
 
 Ishlash tartibi:
-  1. QR50BM o'quvchi chekdagi QR-kodni o'qiydi va matnni RS485 (USB adapter) orqali
-     shu kompyuterga yuboradi.
+  1. QR50BM o'quvchi chekdagi QR-kodni o'qiydi va matnni RS485 orqali yuboradi
+     (USB adapter -> COM port, yoki RS485->Ethernet konverter -> socket://IP:port).
   2. Skript QR matnidan "&ticket_id=...(&is_museum=true)" ni ajratib oladi.
   3. ЕЭСБО API: PUT /api/CultureTicket/ValidateTicketAsync  {"hashCode": ...}
-  4. success=true bo'lsa -> C3 panelga (192.168.1.201:4370) "eshikni och" buyrug'i,
-     rele N soniya yopiladi va turniket ochiladi.
+  4. success=true bo'lsa -> turniket ochiladi. open_mode bo'yicha:
+       http  — tarmoq rele C3 BUTTON1 ni tutashtiradi (PUSH proshivkali panel uchun)
+       relay — USB rele C3 BUTTON1 ni tutashtiradi
+       c3    — C3 panelga 4370-port orqali buyruq (faqat PULL proshivka)
 
 Ishga tushirish:
   python turnstile_gateway.py                  # oddiy rejim (config.ini dan)
@@ -106,11 +108,14 @@ class TicketApi:
         r = self.s.post(self._url("Token"),
                         json={"login": self.login, "password": self.password},
                         timeout=self.timeout, verify=self.verify_tls)
-        r.raise_for_status()
-        data = r.json()
+        try:
+            data = r.json()
+        except ValueError:
+            data = {"error": r.text[:300]}
         tok = (data.get("result") or {}).get("accessToken")
-        if not tok:
-            raise RuntimeError(f"Token olinmadi: {data.get('error')}")
+        if r.status_code != 200 or not tok:
+            raise RuntimeError(f"Token olinmadi [{r.status_code}]: {data.get('error') or data} "
+                               f"— config.ini dagi login/parolni tekshiring")
         self.token = tok
         self.token_time = time.time()
         log.info("ЕЭСБО: token olindi")
